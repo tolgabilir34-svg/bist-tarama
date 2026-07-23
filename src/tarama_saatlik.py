@@ -24,13 +24,13 @@ BIST_SYMBOLS_URL = "https://raw.githubusercontent.com/ahmeterenodaci/Istanbul-St
 
 
 def bist_semboller():
+    """Tüm BIST hisselerini GitHub'dan çeker. EKSTRA_SEMBOLLER ile ek hisse eklenebilir."""
     try:
         r = requests.get(BIST_SYMBOLS_URL, timeout=15)
         r.raise_for_status()
         data = r.json()
         semboller = [item["symbol"] + ".IS" for item in data if "symbol" in item]
         log.info(f"1H tarama: {len(semboller)} sembol yüklendi")
-        return semboller
     except Exception as e:
         log.warning(f"Sembol listesi alınamadı ({e}), yedek kullanılıyor")
         yedek = [
@@ -40,7 +40,20 @@ def bist_semboller():
             "DOAS","EKGYO","ENKAI","PETKM","TCELL","TTKOM",
             "ASELS","KOZAL","KRDMD","CCOLA","AEFES","BIGEN",
         ]
-        return [s + ".IS" for s in yedek]
+        semboller = [s + ".IS" for s in yedek]
+
+    # Railway Variables'tan ekstra sembol ekle
+    # Örnek: EKSTRA_SEMBOLLER = BIGEN,THYAO,GARAN
+    ekstra = os.environ.get("EKSTRA_SEMBOLLER", "")
+    if ekstra:
+        ekstra_list = [s.strip().upper() + ".IS" for s in ekstra.split(",") if s.strip()]
+        onceki = len(semboller)
+        semboller = list(dict.fromkeys(semboller + ekstra_list))
+        yeni = len(semboller) - onceki
+        if yeni > 0:
+            log.info(f"1H: {yeni} ekstra sembol eklendi: {ekstra_list}")
+
+    return semboller
 
 
 def bb_width_hesapla(kapanis):
