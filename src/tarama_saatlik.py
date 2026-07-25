@@ -155,7 +155,7 @@ def tarama_yap_1h():
         sonuc = hisse_analiz_1h(sembol)
         if sonuc:
             sonuclar.append(sonuc)
-        time.sleep(0.15)
+        time.sleep(0.5)
 
     log.info(f"1H tarama bitti — {len(sonuclar)} hisse koşulları sağladı")
 
