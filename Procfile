@@ -1,1 +1,1 @@
-worker: python src/zamanlayici.py
+web: python src/zamanlayici.py
