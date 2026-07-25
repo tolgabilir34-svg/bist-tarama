@@ -1,4 +1,3 @@
-import threading
 import logging
 from webhook import webhook_baslat
 
@@ -7,7 +6,5 @@ log = logging.getLogger(__name__)
 
 log.info("BIST Tarama Botu başladı")
 log.info("Mod: TradingView Webhook")
-log.info("TradingView sinyalleri beklenyor...")
 
-# Webhook sunucusunu başlat (ana thread)
 webhook_baslat()
