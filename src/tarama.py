@@ -20,6 +20,7 @@ SQUEEZE_BARS  = int(os.environ.get("SQUEEZE_BARS", "50"))
 HACIM_CARPAN  = float(os.environ.get("HACIM_CARPAN", "2.0"))
 HACIM_PERIYOT = int(os.environ.get("HACIM_PERIYOT", "20"))
 BREAKOUT_BARS = int(os.environ.get("BREAKOUT_BARS", "30"))
+BATCH_SIZE    = int(os.environ.get("BATCH_SIZE", "50"))  # Kaçar kaçar indirilsin
 
 BIST_SYMBOLS_URL = "https://raw.githubusercontent.com/ahmeterenodaci/Istanbul-Stock-Exchange--BIST--including-symbols-and-logos/main/bist.min.json"
 
@@ -54,16 +55,33 @@ def bist_semboller():
     return semboller
 
 
-def seri_al(df, kolon):
-    """DataFrame'den tek boyutlu seri güvenli şekilde alır."""
-    if isinstance(df.columns, pd.MultiIndex):
-        # (Close, SEMBOL.IS) formatı
-        col_data = df[kolon]
-        if isinstance(col_data, pd.DataFrame):
-            col_data = col_data.iloc[:, 0]
-        return col_data.dropna()
-    else:
-        return df[kolon].dropna()
+def toplu_indir(semboller, period="300d", interval="1d"):
+    """Hisseleri batch halinde toplu indirir — rate limit riskini azaltır."""
+    tum_veri = {}
+    for i in range(0, len(semboller), BATCH_SIZE):
+        batch = semboller[i:i + BATCH_SIZE]
+        log.info(f"Batch indiriliyor: {i+1}–{min(i+BATCH_SIZE, len(semboller))} / {len(semboller)}")
+        try:
+            df = yf.download(
+                batch,
+                period=period,
+                interval=interval,
+                progress=False,
+                auto_adjust=True,
+                group_by="ticker",
+            )
+            for sembol in batch:
+                try:
+                    if len(batch) == 1:
+                        tum_veri[sembol] = df
+                    else:
+                        tum_veri[sembol] = df[sembol]
+                except Exception:
+                    pass
+        except Exception as e:
+            log.warning(f"Batch hatası ({batch[0]}...): {e}")
+        time.sleep(2)  # Batch arası bekleme
+    return tum_veri
 
 
 def bb_width_hesapla(kapanis):
@@ -82,20 +100,13 @@ def is_squeezed(bb_width_serisi, idx):
     return float(bb_width_serisi.iloc[idx]) <= esik
 
 
-def hisse_analiz(sembol):
+def hisse_analiz(sembol, df):
     try:
-        df = yf.download(
-            sembol,
-            period="300d",
-            interval="1d",
-            progress=False,
-            auto_adjust=True,
-        )
         if df is None or len(df) < SQUEEZE_BARS + BB_PERIYOT + 5:
             return None
 
-        kapanis = seri_al(df, "Close")
-        hacim   = seri_al(df, "Volume")
+        kapanis = df["Close"].dropna()
+        hacim   = df["Volume"].dropna()
 
         if len(kapanis) < SQUEEZE_BARS + BB_PERIYOT + 5:
             return None
@@ -148,15 +159,16 @@ def telegram_gonder(mesaj):
 def tarama_yap():
     log.info("Tarama başladı")
     semboller = bist_semboller()
-    sonuclar  = []
 
-    for i, sembol in enumerate(semboller):
-        if i % 50 == 0:
-            log.info(f"{i}/{len(semboller)} işlendi")
-        sonuc = hisse_analiz(sembol)
+    # Toplu indirme
+    tum_veri = toplu_indir(semboller, period="300d", interval="1d")
+    log.info(f"{len(tum_veri)} hisse verisi indirildi")
+
+    sonuclar = []
+    for sembol, df in tum_veri.items():
+        sonuc = hisse_analiz(sembol, df)
         if sonuc:
             sonuclar.append(sonuc)
-        time.sleep(0.5)
 
     log.info(f"Tarama bitti — {len(sonuclar)} hisse koşulları sağladı")
 
