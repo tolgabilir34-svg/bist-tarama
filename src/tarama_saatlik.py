@@ -1,7 +1,9 @@
 import os
 import time
+import math
 import logging
 import requests
+import pandas as pd
 import yfinance as yf
 from datetime import datetime
 
@@ -11,7 +13,6 @@ log = logging.getLogger(__name__)
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-# --- Parametreler ---
 BB_PERIYOT    = int(os.environ.get("BB_PERIYOT_1H", "20"))
 BB_CARPAN     = float(os.environ.get("BB_CARPAN_1H", "2.0"))
 SQUEEZE_PCT   = int(os.environ.get("SQUEEZE_PCT_1H", "20"))
@@ -24,7 +25,6 @@ BIST_SYMBOLS_URL = "https://raw.githubusercontent.com/ahmeterenodaci/Istanbul-St
 
 
 def bist_semboller():
-    """Tüm BIST hisselerini GitHub'dan çeker. EKSTRA_SEMBOLLER ile ek hisse eklenebilir."""
     try:
         r = requests.get(BIST_SYMBOLS_URL, timeout=15)
         r.raise_for_status()
@@ -42,8 +42,6 @@ def bist_semboller():
         ]
         semboller = [s + ".IS" for s in yedek]
 
-    # Railway Variables'tan ekstra sembol ekle
-    # Örnek: EKSTRA_SEMBOLLER = BIGEN,THYAO,GARAN
     ekstra = os.environ.get("EKSTRA_SEMBOLLER", "")
     if ekstra:
         ekstra_list = [s.strip().upper() + ".IS" for s in ekstra.split(",") if s.strip()]
@@ -54,6 +52,17 @@ def bist_semboller():
             log.info(f"1H: {yeni} ekstra sembol eklendi: {ekstra_list}")
 
     return semboller
+
+
+def seri_al(df, kolon):
+    """DataFrame'den tek boyutlu seri güvenli şekilde alır."""
+    if isinstance(df.columns, pd.MultiIndex):
+        col_data = df[kolon]
+        if isinstance(col_data, pd.DataFrame):
+            col_data = col_data.iloc[:, 0]
+        return col_data.dropna()
+    else:
+        return df[kolon].dropna()
 
 
 def bb_width_hesapla(kapanis):
@@ -74,7 +83,6 @@ def is_squeezed(bb_width_serisi, idx):
 
 def hisse_analiz_1h(sembol):
     try:
-        # 1 saatlik veri — 60 günlük yeterli
         df = yf.download(
             sembol,
             period="60d",
@@ -85,9 +93,11 @@ def hisse_analiz_1h(sembol):
         if df is None or len(df) < SQUEEZE_BARS + BB_PERIYOT + 5:
             return None
 
-        df      = df.copy()
-        kapanis = df["Close"].squeeze()
-        hacim   = df["Volume"].squeeze()
+        kapanis = seri_al(df, "Close")
+        hacim   = seri_al(df, "Volume")
+
+        if len(kapanis) < SQUEEZE_BARS + BB_PERIYOT + 5:
+            return None
 
         # Koşul 1 — Önceki barda BB sıkışması
         bb_w    = bb_width_hesapla(kapanis)
@@ -106,14 +116,19 @@ def hisse_analiz_1h(sembol):
         if float(kapanis.iloc[-1]) <= float(onceki_zirve):
             return None
 
-        degisim = ((float(kapanis.iloc[-1]) - float(kapanis.iloc[-2]))
-                   / float(kapanis.iloc[-2])) * 100
+        fiyat_bugun = float(kapanis.iloc[-1])
+        fiyat_dun   = float(kapanis.iloc[-2])
+
+        if math.isnan(fiyat_bugun) or math.isnan(fiyat_dun) or fiyat_dun == 0:
+            return None
+
+        degisim = ((fiyat_bugun - fiyat_dun) / fiyat_dun) * 100
 
         return {
-            "sembol":     sembol.replace(".IS", ""),
-            "fiyat":      round(float(kapanis.iloc[-1]), 2),
-            "degisim":    round(degisim, 2),
-            "hacim_oran": round(bugun_hacim_oran, 1),
+            "sembol":      sembol.replace(".IS", ""),
+            "fiyat":       round(fiyat_bugun, 2),
+            "degisim":     round(degisim, 2),
+            "hacim_oran":  round(bugun_hacim_oran, 1),
             "bb_genislik": round(float(bb_w.iloc[-2]) * 100, 2),
         }
 
@@ -149,31 +164,26 @@ def tarama_yap_1h():
     tarih = simdi.strftime("%d.%m.%Y")
 
     if not sonuclar:
-        mesaj = (
-            f"⏱ <b>BIST 1 Saatlik Tarama — {tarih} {saat}</b>\n\n"
-            f"Bu saatte koşulları sağlayan hisse bulunamadı.\n\n"
-            f"<i>BB sıkışması | Hacim ≥{HACIM_CARPAN}x | {BREAKOUT_BARS} bar kırılım</i>"
-        )
-    else:
-        sonuclar.sort(key=lambda x: x["hacim_oran"], reverse=True)
+        return  # Sinyal yoksa mesaj gönderme
 
-        satirlar = []
-        for s in sonuclar:
-            ok = "🟢" if s["degisim"] >= 0 else "🔴"
-            satirlar.append(
-                f"{ok} <b>{s['sembol']}</b>  "
-                f"{s['fiyat']} TL  "
-                f"({'+' if s['degisim'] >= 0 else ''}{s['degisim']}%)  "
-                f"| Hacim: {s['hacim_oran']}x  BB: %{s['bb_genislik']}"
-            )
-
-        mesaj = (
-            f"⏱ <b>BIST 1 Saatlik Tarama — {tarih} {saat}</b>\n"
-            f"<i>{len(sonuclar)} hisse / {len(semboller)} tarandı</i>\n\n"
-            + "\n".join(satirlar)
-            + f"\n\n<i>BB sıkışması | Hacim ≥{HACIM_CARPAN}x | {BREAKOUT_BARS} bar kırılım</i>"
-            + "\n<i>⚠️ Yatırım tavsiyesi değildir.</i>"
+    sonuclar.sort(key=lambda x: x["hacim_oran"], reverse=True)
+    satirlar = []
+    for s in sonuclar:
+        ok = "🟢" if s["degisim"] >= 0 else "🔴"
+        satirlar.append(
+            f"{ok} <b>{s['sembol']}</b>  "
+            f"{s['fiyat']} TL  "
+            f"({'+' if s['degisim'] >= 0 else ''}{s['degisim']}%)  "
+            f"| Hacim: {s['hacim_oran']}x  BB: %{s['bb_genislik']}"
         )
+
+    mesaj = (
+        f"⏱ <b>BIST 1 Saatlik Tarama — {tarih} {saat}</b>\n"
+        f"<i>{len(sonuclar)} hisse / {len(semboller)} tarandı</i>\n\n"
+        + "\n".join(satirlar)
+        + f"\n\n<i>BB sıkışması | Hacim ≥{HACIM_CARPAN}x | {BREAKOUT_BARS} bar kırılım</i>"
+        + "\n<i>⚠️ Yatırım tavsiyesi değildir.</i>"
+    )
 
     telegram_gonder(mesaj)
     log.info("1H Telegram mesajı gönderildi")
