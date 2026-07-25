@@ -1,5 +1,6 @@
 import os
 import time
+import math
 import logging
 import requests
 import pandas as pd
@@ -12,7 +13,6 @@ log = logging.getLogger(__name__)
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-# --- Parametreler (Pine Script ile aynı) ---
 BB_PERIYOT    = int(os.environ.get("BB_PERIYOT", "20"))
 BB_CARPAN     = float(os.environ.get("BB_CARPAN", "2.0"))
 SQUEEZE_PCT   = int(os.environ.get("SQUEEZE_PCT", "20"))
@@ -21,12 +21,10 @@ HACIM_CARPAN  = float(os.environ.get("HACIM_CARPAN", "2.0"))
 HACIM_PERIYOT = int(os.environ.get("HACIM_PERIYOT", "20"))
 BREAKOUT_BARS = int(os.environ.get("BREAKOUT_BARS", "30"))
 
-# Sembol listesi kaynağı
 BIST_SYMBOLS_URL = "https://raw.githubusercontent.com/ahmeterenodaci/Istanbul-Stock-Exchange--BIST--including-symbols-and-logos/main/bist.min.json"
 
 
 def bist_semboller():
-    """Tüm BIST hisselerini GitHub'dan çeker. EKSTRA_SEMBOLLER ile ek hisse eklenebilir."""
     try:
         r = requests.get(BIST_SYMBOLS_URL, timeout=15)
         r.raise_for_status()
@@ -44,18 +42,28 @@ def bist_semboller():
         ]
         semboller = [s + ".IS" for s in yedek]
 
-    # Railway Variables'tan ekstra sembol ekle
-    # Örnek: EKSTRA_SEMBOLLER = BIGEN,THYAO,GARAN
     ekstra = os.environ.get("EKSTRA_SEMBOLLER", "")
     if ekstra:
         ekstra_list = [s.strip().upper() + ".IS" for s in ekstra.split(",") if s.strip()]
         onceki = len(semboller)
-        semboller = list(dict.fromkeys(semboller + ekstra_list))  # tekrar olmayanları ekle
+        semboller = list(dict.fromkeys(semboller + ekstra_list))
         yeni = len(semboller) - onceki
         if yeni > 0:
             log.info(f"{yeni} ekstra sembol eklendi: {ekstra_list}")
 
     return semboller
+
+
+def seri_al(df, kolon):
+    """DataFrame'den tek boyutlu seri güvenli şekilde alır."""
+    if isinstance(df.columns, pd.MultiIndex):
+        # (Close, SEMBOL.IS) formatı
+        col_data = df[kolon]
+        if isinstance(col_data, pd.DataFrame):
+            col_data = col_data.iloc[:, 0]
+        return col_data.dropna()
+    else:
+        return df[kolon].dropna()
 
 
 def bb_width_hesapla(kapanis):
@@ -86,9 +94,11 @@ def hisse_analiz(sembol):
         if df is None or len(df) < SQUEEZE_BARS + BB_PERIYOT + 5:
             return None
 
-        df      = df.copy()
-        kapanis = df["Close"].squeeze()
-        hacim   = df["Volume"].squeeze()
+        kapanis = seri_al(df, "Close")
+        hacim   = seri_al(df, "Volume")
+
+        if len(kapanis) < SQUEEZE_BARS + BB_PERIYOT + 5:
+            return None
 
         # Koşul 1 — Önceki barda BB sıkışması
         bb_w    = bb_width_hesapla(kapanis)
@@ -107,12 +117,17 @@ def hisse_analiz(sembol):
         if float(kapanis.iloc[-1]) <= float(onceki_zirve):
             return None
 
-        degisim = ((float(kapanis.iloc[-1]) - float(kapanis.iloc[-2]))
-                   / float(kapanis.iloc[-2])) * 100
+        fiyat_bugun = float(kapanis.iloc[-1])
+        fiyat_dun   = float(kapanis.iloc[-2])
+
+        if math.isnan(fiyat_bugun) or math.isnan(fiyat_dun) or fiyat_dun == 0:
+            return None
+
+        degisim = ((fiyat_bugun - fiyat_dun) / fiyat_dun) * 100
 
         return {
             "sembol":      sembol.replace(".IS", ""),
-            "fiyat":       round(float(kapanis.iloc[-1]), 2),
+            "fiyat":       round(fiyat_bugun, 2),
             "degisim":     round(degisim, 2),
             "hacim_oran":  round(bugun_hacim_oran, 1),
             "bb_genislik": round(float(bb_w.iloc[-2]) * 100, 2),
@@ -156,7 +171,6 @@ def tarama_yap():
         )
     else:
         sonuclar.sort(key=lambda x: x["hacim_oran"], reverse=True)
-
         satirlar = []
         for s in sonuclar:
             ok = "🟢" if s["degisim"] >= 0 else "🔴"
